@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TAMU Digital Twin</title>
+    <script src="https://unpkg.com/neo4j-driver"></script>
+    <link rel="stylesheet" href="https://js.arcgis.com/4.26/esri/themes/light/main.css">
+    <script src="https://js.arcgis.com/4.26/"></script>
+    <script src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY"></script>
+    <style>
+        html, body, #map {
+            padding: 0;
+            margin: 0;
+            height: 100%;
+            width: 100%;
+        }
+        #layerList, #streetViewContainer, #neo4jSearch, #neo4jResults, #chatContainer {
+            position: absolute;
+            background-color: white;
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+            z-index: 99;
+        }
+        #layerList {
+            top: 20px;
+            right: 20px;
+        }
+        #streetViewContainer {
+            bottom: 20px;
+            left: 20px;
+            display: none;
+            width: 400px;
+            height: 300px;
+        }
+        #pano {
+            width: 100%;
+            height: 100%;
+        }
+        #neo4jSearch {
+            top: 400px;
+            left: 20px;
+        }
+        #neo4jResults {
+            top: 450px;
+            left: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+            display: none;
+        }
+        #chatContainer {
+            top: 300px;
+            right: 20px;
+            width: 330px;
+            background-color: #f0f0f0;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        #chatHeader {
+            background-color: #500000;
+            color: white;
+            padding: 10px;
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
+            font-weight: bold;
+        }
+        #chatMessages {
+            height: 300px;
+            overflow-y: auto;
+            padding: 10px;
+            background-color: white;
+        }
+        .message {
+            width: 250;
+            margin-bottom: 10px;
+            padding: 8px;
+            border-radius: 5px;
+        }
+        .user-message {
+            background-color: #D4B5B5;
+            align-self: flex-end;
+        }
+        .ai-message {
+            background-color: #f0f0f0;
+            align-self: flex-start;
+        }
+        #userInput {
+            width: 250px;
+            padding: 10px;
+            border: none;
+            border-top: 1px solid #ccc;
+            border-bottom-left-radius: 10px;
+            border-bottom-right-radius: 10px;
+        }
+        #sendButton {
+            position: absolute;
+            right: 15px;
+            bottom: 15px;
+            background-color: #500000;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .location-link {
+            color: blue;
+            text-decoration: underline;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="layerList"></div>
+    <div id="streetViewContainer">
+        <div id="pano"></div>
+    </div>
+    <div id="chatContainer">
+        <div id="chatHeader">TAMU Digital Twin Assistant</div>
+        <div id="chatMessages"></div>
+        <input type="text" id="userInput" placeholder="Ask a question...">
+        <button id="sendButton" onclick="sendMessage()">Send</button>
+    </div>
+
+    <script>
+        let driver;
+        let view;
+        let viewReadyPromise;
+
+        require([
+            "esri/Map",
+            "esri/views/MapView",
+            "esri/layers/FeatureLayer",
+            "esri/layers/MapImageLayer",
+            "esri/widgets/Search",
+            "esri/widgets/LayerList",
+            "esri/PopupTemplate",
+            "esri/Graphic"
+        ], function(Map, MapView, FeatureLayer, MapImageLayer, Search, LayerList, PopupTemplate, Graphic) {
+
+            const map = new Map({
+                basemap: "dark-gray-vector"
+            });
+
+            view = new MapView({
+                container: "map",
+                map: map,
+                center: [-96.344, 30.613],
+                zoom: 14
+            });
+
+            // 创建一个 Promise 来表示 view 准备就绪状态
+            viewReadyPromise = new Promise((resolve) => {
+                view.when(() => {
+                    resolve();
+                });
+            });
+
+            // Add building layer
+            const buildingLayer = new FeatureLayer({
+                url: "https://gis.tamu.edu/arcgis/rest/services/FCOR/TAMU_BaseMap/MapServer/2",
+                outFields: ["*"],
+                popupTemplate: {
+                    title: "{BldgName}",
+                    content: [
+                        {
+                            type: "fields",
+                            fieldInfos: [
+                                { fieldName: "NumFloors", label: "Number of Floors" },
+                                { fieldName: "Address", label: "Address" },
+                                { fieldName: "City", label: "City" }
+                            ]
+                        }
+                    ]
+                }
+            });
+
+            map.add(buildingLayer);
+
+            // Add tree layer
+            const treeLayer = new FeatureLayer({
+                url: "https://gis.tamu.edu/arcgis/rest/services/FCOR/TAMU_BaseMap/MapServer/4",
+                outFields: ["*"],
+                popupTemplate: {
+                    title: "{Species}",
+                    content: [
+                        {
+                            type: "fields",
+                            fieldInfos: [
+                                { fieldName: "Height", label: "Height" }
+                            ]
+                        }
+                    ]
+                }
+            });
+
+            map.add(treeLayer);
+
+            // Add road layer
+            const roadLayer = new FeatureLayer({
+                url: "https://gis.tamu.edu/arcgis/rest/services/Routing/20220119/MapServer/3",
+                outFields: ["*"],
+                popupTemplate: {
+                    title: "{Name}",
+                    content: [
+                        {
+                            type: "fields",
+                            fieldInfos: [
+                                { fieldName: "Total_Time", label: "Total Time" },
+                                { fieldName: "Total_Length", label: "Total Length" }
+                            ]
+                        }
+                    ]
+                }
+            });
+
+            map.add(roadLayer);
+
+            // Add TS_Main layers
+            const tsMainLayer = new MapImageLayer({
+                url: "https://gis.tamu.edu/arcgis/rest/services/TS/TS_Main/MapServer",
+                sublayers: [
+                    { id: 0, title: "Bus Stops", visible: true },
+                    { id: 1, title: "Route Stop/Start Points", visible: true },
+                    { id: 2, title: "Campus Stops", visible: true },
+                    { id: 3, title: "Construction", visible: true },
+                    { id: 4, title: "Visitor Kiosks", visible: true },
+                    { id: 5, title: "Line Paint", visible: true },
+                    { id: 6, title: "Parking Lots", visible: true },
+                    { id: 7, title: "RNS Spaces", visible: true },
+                ]
+            });
+
+            map.add(tsMainLayer);
+
+            // Add LayerList widget
+            const layerList = new LayerList({
+                view: view,
+                container: "layerList"
+            });
+
+            // Add Search widget
+            const searchWidget = new Search({
+                view: view,
+                allPlaceholder: "Search TAMU Buildings",
+                sources: [{
+                    layer: buildingLayer,
+                    searchFields: ["BldgName", "Address"],
+                    displayField: "BldgName",
+                    exactMatch: false,
+                    outFields: ["*"],
+                    name: "TAMU Buildings",
+                    placeholder: "Search buildings"
+                }]
+            });
+
+            view.ui.add(searchWidget, {
+                position: "top-left",
+                index: 0
+            });
+
+            // Zoom to full extent of building layer when loaded
+            buildingLayer.when(() => {
+                view.goTo(buildingLayer.fullExtent);
+            });
+
+            // Function to initialize and show street view
+            function showStreetView(lat, lng) {
+                const panorama = new google.maps.StreetViewPanorama(
+                    document.getElementById("pano"),
+                    {
+                        position: { lat: lat, lng: lng },
+                        pov: {
+                            heading: 34,
+                            pitch: 10,
+                        },
+                    }
+                );
+                document.getElementById('streetViewContainer').style.display = 'block';
+            }
+
+            // Add click event listener to the view
+            view.on("click", function(event) {
+                view.hitTest(event).then(function(response) {
+                    if (response.results.length) {
+                        const graphic = response.results.filter(function(result) {
+                            return result.graphic.layer === treeLayer;
+                        })[0];
+
+                        if (graphic && graphic.graphic.geometry) {
+                            const geometry = graphic.graphic.geometry;
+                            showStreetView(geometry.latitude, geometry.longitude);
+                        }
+                    }
+                });
+            });
+        });
+
+        const uri = 'neo4j://localhost:7687';
+        const user = 'neo4j';
+        const password = '1234567890';
+
+        // Create a driver instance
+        function initNeo4j() {
+            driver = neo4j.driver(uri, neo4j.auth.basic(user, password));
+            session = driver.session();
+        }
+        window.onload = initNeo4j;
+
+        // ChatGPT integration
+        async function sendMessage() {
+            const userInput = document.getElementById('userInput');
+            const chatMessages = document.getElementById('chatMessages');
+            const userMessage = userInput.value;
+            
+            // Display user message
+            chatMessages.innerHTML += `<div class="message user-message"><strong>You:</strong> ${userMessage}</div>`;
+            
+            // Clear input field
+            userInput.value = '';
+            
+            // Show typing indicator
+            chatMessages.innerHTML += `<div id="typingIndicator" class="message ai-message"><em>AI is typing...</em></div>`;
+            
+            // Scroll to bottom of chat
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            
+            // Perform RAG with Neo4j
+            try {
+                const searchTerms = userMessage.toLowerCase().split(' ');
+                let contextInfo = 'Building Information:\n';
+                let hasResults = false;
+
+                for (const term of searchTerms) {
+                    const neo4jResult = await session.run(
+                        `MATCH (b:Building)
+                        WHERE toLower(b.name) CONTAINS toLower($searchTerm)
+                            OR toLower(b.address) CONTAINS toLower($searchTerm)
+                            OR toLower(b.city) CONTAINS toLower($searchTerm)
+                        RETURN b.name AS name, b.address AS address, b.city AS city,
+                                b.longitude AS longitude, b.latitude AS latitude,
+                                b.num_floors AS num_floors, b.year_built AS year_built
+                        LIMIT 3`,
+                        { searchTerm: term }
+                    );
+                    
+                    if (neo4jResult.records.length > 0) {
+                        hasResults = true;
+                        neo4jResult.records.forEach(record => {
+                            contextInfo += `Name: ${record.get('name') || 'N/A'}\n`;
+                            contextInfo += `Address: ${record.get('address') || 'N/A'}\n`;
+                            contextInfo += `City: ${record.get('city') || 'N/A'}\n`;
+                            contextInfo += `Longitude: ${record.get('longitude') || 'N/A'}\n`;
+                            contextInfo += `Latitude: ${record.get('latitude') || 'N/A'}\n`;
+                            contextInfo += `Number of Floors: ${record.get('num_floors') || 'N/A'}\n`;
+                            contextInfo += `Year Built: ${record.get('year_built') || 'N/A'}\n\n`;
+                        });
+                    }
+                }
+
+                console.log("Search terms:", searchTerms);
+                console.log("Has results:", hasResults);
+                console.log("Context info:", contextInfo);
+
+                if (!hasResults) {
+                    contextInfo = "No matching buildings found in the database.";
+                }
+                
+                // Send request to ChatGPT API
+                const chatGPTResponse = await getChatGPTResponse(userMessage, contextInfo);
+                
+                // Parse location and address from ChatGPT response using GPT
+                const locations = await parseLocationsWithGPT(chatGPTResponse);
+                
+                // Remove typing indicator
+                const typingIndicator = document.getElementById('typingIndicator');
+                if (typingIndicator) {
+                    typingIndicator.remove();
+                }
+                
+                // Display ChatGPT response with clickable locations
+                let processedResponse;
+                try {
+                    processedResponse = addLocationLinks(chatGPTResponse, locations);
+                } catch (linkError) {
+                    console.error('Error adding location links:', linkError);
+                    processedResponse = chatGPTResponse;
+                }
+                chatMessages.innerHTML += `<div class="message ai-message"><strong>AI:</strong> ${processedResponse}</div>`;
+            } catch (error) {
+                console.error('Error:', error);
+                chatMessages.innerHTML += `<div class="message ai-message"><strong>AI:</strong> Sorry, I encountered an error while processing your request.</div>`;
+            }
+            
+            // Scroll to bottom of chat
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        // 添加回车键发送消息功能
+        document.getElementById('userInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+
+        async function parseLocationsWithGPT(text) {
+            const prompt = `Extract building names, addresses and cities from the following text in TAMU. Return the result as a JSON array of objects, each with 'name', 'address' and 'city' properties. If a property is not mentioned, use an empty string. Do not include any markdown formatting or explanation, just the raw JSON. Text: "${text}"`;
+            
+            try {
+                let gptResponse = await getChatGPTResponse(prompt, '');
+                
+                // Clean up the response
+                gptResponse = gptResponse.replace(/```json\s?|```/g, '').trim();
+                
+                // Parse the cleaned JSON
+                let locations;
+                try {
+                    locations = JSON.parse(gptResponse);
+                } catch (parseError) {
+                    console.error('Error parsing GPT response:', parseError);
+                    console.log('Raw GPT response:', gptResponse);
+                    return [];
+                }
+                
+                // Validate the parsed data
+                if (!Array.isArray(locations)) {
+                    console.error('GPT response is not an array');
+                    return [];
+                }
+                
+                locations = locations.filter(location => {
+                    if (typeof location !== 'object' || location === null) {
+                        console.error('Invalid location object:', location);
+                        return false;
+                    }
+                    // Ensure all properties exist, use empty string if not present
+                    location.name = location.name || '';
+                    location.address = location.address || '';
+                    location.city = location.city || '';
+                    return true;
+                });
+
+                console.log('Parsed locations:', locations);
+                return locations;
+            } catch (error) {
+                console.error('Error parsing locations with GPT:', error);
+                return [];
+            }
+        }
+
+        function escapeRegExp(string) {
+            if (typeof string !== 'string') {
+                console.error('Invalid input to escapeRegExp:', string);
+                return '';
+            }
+            return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        function addLocationLinks(text, locations) {
+            if (typeof text !== 'string') {
+                console.error('Invalid text input to addLocationLinks:', text);
+                return '';
+            }
+
+            let processedText = text;
+            locations.forEach(location => {
+                if (typeof location.name !== 'string' || typeof location.address !== 'string' || typeof location.city !== 'string') {
+                    console.error('Invalid location object:', location);
+                    return;
+                }
+
+                if (location.name) {
+                    const nameRegex = new RegExp(`\\b${escapeRegExp(location.name)}\\b`, 'gi');
+                    processedText = processedText.replace(nameRegex, (match) => {
+                        return `<span class="location-link" onclick="jumpToLocation('${encodeURIComponent(location.name)}', '${encodeURIComponent(location.address)}', '${encodeURIComponent(location.city)}')">${match}</span>`;
+                    });
+                }
+                
+                if (location.address) {
+                    const addressRegex = new RegExp(`\\b${escapeRegExp(location.address)}\\b`, 'gi');
+                    processedText = processedText.replace(addressRegex, (match) => {
+                        return `<span class="location-link" onclick="jumpToLocation('${encodeURIComponent(location.name)}', '${encodeURIComponent(location.address)}', '${encodeURIComponent(location.city)}')">${match}</span>`;
+                    });
+                }
+            });
+            return processedText;
+        }
+    
+        async function jumpToLocation(name, address, city) {
+            try {
+                // 等待 view 准备就绪
+                await viewReadyPromise;
+
+                // 再次检查 view 是否存在且有 goTo 方法
+                if (!view || typeof view.goTo !== 'function') {
+                    console.error('View is not properly initialized');
+                    return;
+                }
+
+                console.log(`Attempting to jump to location: ${name}, ${address}, ${city}`);
+
+                const decodedName = decodeURIComponent(name);
+                const decodedAddress = decodeURIComponent(address);
+                const decodedCity = decodeURIComponent(city);
+
+                const result = await session.run(
+                    `MATCH (b:Building)
+                    WHERE toLower(b.name) CONTAINS toLower($name)
+                    RETURN b.latitude AS latitude, b.longitude AS longitude, b.name AS foundName, b.address AS foundAddress, b.city AS foundCity
+                    LIMIT 1`,
+                    { name: decodedName, address: decodedAddress, city: decodedCity }
+                );
+
+                console.log(`Database query result:`, result.records);
+
+                if (result.records.length > 0) {
+                    const latitude = result.records[0].get('latitude');
+                    const longitude = result.records[0].get('longitude');
+                    const foundName = result.records[0].get('foundName');
+                    const foundAddress = result.records[0].get('foundAddress');
+                    const foundCity = result.records[0].get('foundCity');
+                    // // 调整坐标以修正偏移
+                    // latitude -= 0.0008; // 向北调整约33米
+                    // longitude -= 0.0003; // 向西略微调整约11米
+                    await view.goTo({
+                        center: [longitude, latitude],
+                        zoom: 18
+                    });
+
+                    console.log(`Location found: ${foundName}, ${foundAddress}, ${foundCity}`);
+                } else {
+                    console.log('Location not found in database');
+                }
+            } catch (error) {
+                console.error('Error in jumpToLocation:', error);
+            }
+        }
+
+        // Function to get response from ChatGPT API (you need to implement this)
+        async function getChatGPTResponse(userMessage, contextInfo) {
+            const apiKey = 'sk-7ncKHBPa4Anha3Utb2Lbc1aNRCzHcr2038SbdKL0jV81q6e0';
+            const apiUrl = 'https://api.deepbricks.ai/v1/chat/completions';
+
+            const promptText = `You are a helpful assistant for a TAMU Digital Twin application. Given the following building information:
+
+            ${contextInfo}
+
+            Please answer the user's question accurately and concisely based on the provided information. If the exact information is not available, please say so.
+
+            User question: ${userMessage}
+
+            Your response:`;
+
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                },
+                body: JSON.stringify({
+                    model: "gpt-3.5-turbo",
+                    messages: [{role: "user", content: promptText}],
+                    temperature: 0.7
+                })
+            });
+
+            const data = await response.json();
+            return data.choices[0].message.content;
+        }
+
+    </script>
+</body>
+</html>
+
+
+
+<!-- 
+
+where i can find student center?
+
+what year builded the Entomology Research Lab?
+
+how many floors of Sterling C. Evans Library in TAMU? 
+
+I'm current in student recreation center, how far abour Memorial Student Center?
+
+
+
+-->
